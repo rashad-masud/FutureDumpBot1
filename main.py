@@ -24,10 +24,6 @@ def build_exchange():
     return ccxt.binanceusdm(params)
 
 
-def symbol_with_quote(symbol):
-    return symbol if "/" in symbol else f"{symbol}/{QUOTE_CURRENCY}"
-
-
 def select_candidate(exchange):
     tickers = exchange.fetch_tickers()
     candidates = []
@@ -43,8 +39,7 @@ def select_candidate(exchange):
             continue
         candidates.append((pair, float(change), float(volume)))
 
-    candidates.sort(key=lambda x: abs(x[1]), reverse=True)
-    strategy = FuturesTrendStrategy()
+    candidates.sort(key=lambda item: abs(item[1]), reverse=True)
     ranked = []
     for pair, change, volume in candidates[:TOP_CANDIDATE_COUNT]:
         try:
@@ -55,15 +50,13 @@ def select_candidate(exchange):
                 engine.update(symbol, {"timestamp": row[0], "open": row[1], "high": row[2], "low": row[3], "close": row[4], "volume": row[5]})
             analysis = engine.get_market_analysis(symbol)
             if analysis and analysis.should_trade:
-                signal = strategy.evaluate(list(engine.candles[symbol]), analysis)
-                if signal:
-                    ranked.append((pair, change, volume, analysis))
+                ranked.append((pair, change, volume, analysis))
         except Exception as exc:
             print(f"[SCAN] {pair}: {exc}")
 
     if not ranked:
         return None
-    ranked.sort(key=lambda item: abs(item[1]), reverse=True)
+    ranked.sort(key=lambda item: (item[3].adx, abs(item[1])), reverse=True)
     selected = ranked[0]
     print(
         f"[SCAN] Selected {selected[0]} 24h={selected[1]:.2f}% "
@@ -96,7 +89,7 @@ def run_symbol(exchange, pair):
         bot.on_price_tick,
         stop_flag=stop_flag,
     )
-    print(f"[BOT] Futures paper trading {pair} on {EXECUTION_TIMEFRAME}")
+    print(f"[BOT] Binance USDT-M futures paper trading {pair} on {EXECUTION_TIMEFRAME}")
     feed.start()
 
 
@@ -107,7 +100,7 @@ def main():
         try:
             pair = select_candidate(exchange)
             if not pair:
-                print("[MAIN] No healthy breakout candidate; rescanning")
+                print("[MAIN] No healthy trend candidate; rescanning")
                 time.sleep(SYMBOL_SCAN_INTERVAL_SECONDS)
                 continue
             run_symbol(exchange, pair)
