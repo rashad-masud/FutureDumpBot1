@@ -1,19 +1,23 @@
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Optional
+
 
 @dataclass
 class Position:
     trade_id: int
     symbol: str
+    side: str
     entry_price: float
     size: float
     leverage: float
-    stop_pct: float
-    opened_at: float
-    open_candle_id: Optional[int] = None
-    open_tick_id: Optional[int] = None
-    best_price: Optional[float] = None
+    stop_loss: float
+    initial_stop_distance: float
+    atr: float
+    trail_stop: float | None = None
+    best_price: float | None = None
+    opened_at: float = field(default_factory=lambda: datetime.utcnow().timestamp())
+    open_candle_id: int | None = None
+    open_tick_id: int | None = None
     trail_active: bool = False
 
     def __post_init__(self):
@@ -21,37 +25,17 @@ class Position:
             self.best_price = self.entry_price
 
     def pnl(self, current_price: float) -> float:
-        # Short only: profit when price drops
+        if self.side == "long":
+            return (current_price - self.entry_price) * self.size
         return (self.entry_price - current_price) * self.size
 
     def pnl_pct(self, current_price: float) -> float:
-        return ((self.entry_price - current_price) / self.entry_price) * 100
-
-    def update_stats(self, current_price: float):
-        current_pnl = self.pnl(current_price)
-        if current_pnl > self.max_profit:
-            self.max_profit = current_pnl
-        current_drawdown = max(0, self.max_profit - current_pnl)
-        if current_drawdown > self.max_drawdown:
-            self.max_drawdown = current_drawdown
-        if current_price < self.best_price:          # for shorts, best is lowest price
-            self.best_price = current_price
-        self.last_updated = datetime.utcnow().timestamp()
+        if self.side == "long":
+            return (current_price - self.entry_price) / self.entry_price * 100.0
+        return (self.entry_price - current_price) / self.entry_price * 100.0
 
     def get_position_value(self, current_price: float) -> float:
         return self.size * current_price
 
     def get_margin_used(self) -> float:
-        return (self.size * self.entry_price) / self.leverage
-
-    def to_dict(self) -> dict:
-        return {
-            'trade_id': self.trade_id,
-            'symbol': self.symbol,
-            'entry_price': self.entry_price,
-            'size': self.size,
-            'leverage': self.leverage,
-            'stop_pct': self.stop_pct,
-            'best_price': self.best_price,
-            'open_ts': self.opened_at,
-        }
+        return self.get_position_value(self.entry_price) / self.leverage
