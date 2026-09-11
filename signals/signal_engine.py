@@ -2,31 +2,19 @@ from collections import deque
 from typing import Dict, Optional, List
 
 from config.settings import (
-    WINDOW_SIZE,
-    DONCHIAN_ENTRY_PERIOD,
-    DONCHIAN_EXIT_PERIOD,
-    EMA_FAST_PERIOD,
-    EMA_SLOW_PERIOD,
-    ATR_PERIOD,
-    ADX_PERIOD,
-    MIN_ADX,
-    MIN_TREND_PCT,
-    MAX_ATR_PCT,
-    MIN_ATR_PCT,
-    MIN_VOLUME_RATIO,
-    BREAKOUT_BUFFER_ATR,
+    WINDOW_SIZE, DONCHIAN_ENTRY_PERIOD, DONCHIAN_EXIT_PERIOD,
+    EMA_FAST_PERIOD, EMA_SLOW_PERIOD, ATR_PERIOD, ADX_PERIOD,
+    MIN_ADX, MIN_TREND_PCT, MAX_ATR_PCT, MIN_ATR_PCT, MIN_VOLUME_RATIO,
+    BREAKOUT_BUFFER_ATR, MIN_DIRECTIONAL_CANDLE_BODY_PCT,
+    MIN_ENTRY_CONFIDENCE, SHORT_EXTRA_VOLUME_RATIO, SHORT_EXTRA_ADX,
+    MIN_PRICE_TREND_PCT_FOR_ENTRY,
 )
 from core.enums import MarketRegime
 from core.model import MarketAnalysis
 
 
 class SignalEngine:
-    """Closed-bar market regime and indicator engine.
-
-    The model is deliberately mechanical: higher-timeframe-style trend context
-    is represented by EMA alignment and ADX, while Donchian channels provide
-    objective breakout/exit levels and ATR supplies volatility/risk distance.
-    """
+    """Closed-bar regime/indicator engine with stricter directional entry gating."""
 
     def __init__(self, window_size: int = WINDOW_SIZE):
         self.window_size = window_size
@@ -148,10 +136,7 @@ class SignalEngine:
             regime = MarketRegime.RANGE
 
         regime_value = regime.value
-        if self._last_regime.get(symbol) == regime_value:
-            age = self._trend_age.get(symbol, 0) + 1
-        else:
-            age = 1
+        age = self._trend_age.get(symbol, 0) + 1 if self._last_regime.get(symbol) == regime_value else 1
         self._last_regime[symbol] = regime_value
         self._trend_age[symbol] = age
 
@@ -160,7 +145,34 @@ class SignalEngine:
         breakout_down = close < lowest_entry - buffer
         entry_breakout = (regime == MarketRegime.TREND_UP and breakout_up) or (regime == MarketRegime.TREND_DOWN and breakout_down)
         volume_ok = volume_ratio >= MIN_VOLUME_RATIO
+        body_pct = abs(close - candles[-1]["open"]) / close if close else 0.0
+        directional_candle = body_pct >= MIN_DIRECTIONAL_CANDLE_BODY_PCT
         confidence = min(1.0, adx / 100.0)
+
+        # Direction-specific strength: shorts demand slightly stronger confirmation
+        # because the bot's primary edge is expected to be dump detection.
+        short_quality = (
+            regime == MarketRegime.TREND_DOWN
+            and adx >= SHORT_EXTRA_ADX
+            and volume_ratio >= SHORT_EXTRA_VOLUME_RATIO
+            and price_change_pct <= -MIN_PRICE_TREND_PCT_FOR_ENTRY
+        )
+        long_quality = (
+            regime == MarketRegime.TREND_UP
+            and price_change_pct >= MIN_PRICE_TREND_PCT_FOR_ENTRY
+        )
+        quality_ok = confidence >= MIN_ENTRY_CONFIDENCE and directional_candle and (short_quality or long_quality)
+        should_trade = (
+            regime in (MarketRegime.TREND_UP, MarketRegime.TREND_DOWN)
+            and age >= 1
+            and volume_ok
+            and entry_breakout
+            and quality_ok
+        )
+
+        reason = "healthy_trend_breakout" if should_trade else regime_value
+        if regime == MarketRegime.TREND_DOWN and entry_breakout and not short_quality:
+            reason = "short_quality_gate_failed"
 
         self.market_analysis[symbol] = MarketAnalysis(
             gen_trend=regime_value,
@@ -170,8 +182,8 @@ class SignalEngine:
             price_change_pct=price_change_pct,
             price_range_pct=(highest_entry - lowest_entry) / close if close else 0.0,
             is_high_volatility=atr_pct > MAX_ATR_PCT,
-            should_trade=(regime in (MarketRegime.TREND_UP, MarketRegime.TREND_DOWN) and age >= 1 and volume_ok),
-            trade_reason="healthy_trend_breakout" if entry_breakout and volume_ok else regime_value,
+            should_trade=should_trade,
+            trade_reason=reason,
             confidence=confidence,
             trend_age=age,
             ema_fast=ema_fast,
@@ -188,5 +200,6 @@ class SignalEngine:
         print(
             f"[REGIME] {symbol} | {regime_value} | ADX={adx:.1f} | "
             f"ATR%={atr_pct:.3%} | EMA={ema_fast:.4f}/{ema_slow:.4f} | "
-            f"volx={volume_ratio:.2f} | breakout={entry_breakout}"
+            f"volx={volume_ratio:.2f} | breakout={entry_breakout} | "
+            f"quality={quality_ok}"
         )
