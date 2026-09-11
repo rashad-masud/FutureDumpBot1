@@ -34,8 +34,7 @@ def _analyse_candidate(exchange, pair):
     engine = SignalEngine(WINDOW_SIZE)
     for row in ohlcv[:-1]:
         engine.update(symbol, {"timestamp": row[0], "open": row[1], "high": row[2], "low": row[3], "close": row[4], "volume": row[5]})
-    analysis = engine.get_market_analysis(symbol)
-    return analysis
+    return engine.get_market_analysis(symbol)
 
 
 def select_candidate(exchange):
@@ -129,11 +128,16 @@ def run_symbol(exchange, pair):
 def main():
     print("[MAIN] Starting configurable futures trend-following bot (paper mode)")
     exchange = build_exchange()
+    favourite_mode = bool(_configured_favourite_tokens())
+
     while True:
         try:
             pair = select_candidate(exchange)
             if not pair:
-                print("[MAIN] No healthy trend candidate; rescanning")
+                if favourite_mode:
+                    print("[MAIN] Favourite tokens not in a healthy trading regime; waiting")
+                else:
+                    print("[MAIN] No healthy trend candidate; rescanning")
                 time.sleep(SYMBOL_SCAN_INTERVAL_SECONDS)
                 continue
             run_symbol(exchange, pair)
