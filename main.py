@@ -24,7 +24,45 @@ def build_exchange():
     return ccxt.binanceusdm(params)
 
 
+def _configured_favourite_tokens():
+    return [token.strip() for token in FAVOURITE_TOKENS.split(",") if token.strip()]
+
+
+def _analyse_candidate(exchange, pair):
+    symbol = pair.replace("/", "")
+    ohlcv = exchange.fetch_ohlcv(pair, timeframe=EXECUTION_TIMEFRAME, limit=WINDOW_SIZE + 1)
+    engine = SignalEngine(WINDOW_SIZE)
+    for row in ohlcv[:-1]:
+        engine.update(symbol, {"timestamp": row[0], "open": row[1], "high": row[2], "low": row[3], "close": row[4], "volume": row[5]})
+    analysis = engine.get_market_analysis(symbol)
+    return analysis
+
+
 def select_candidate(exchange):
+    favourite_tokens = _configured_favourite_tokens()
+    if favourite_tokens:
+        print(f"[SELECT] Favourite token mode enabled: {', '.join(favourite_tokens)}")
+        ranked = []
+        for pair in favourite_tokens:
+            try:
+                analysis = _analyse_candidate(exchange, pair)
+                if analysis and analysis.should_trade:
+                    ranked.append((pair, analysis))
+            except Exception as exc:
+                print(f"[SELECT] {pair}: {exc}")
+
+        if not ranked:
+            return None
+
+        ranked.sort(key=lambda item: item[1].adx, reverse=True)
+        selected = ranked[0]
+        print(
+            f"[SELECT] Selected favourite {selected[0]} "
+            f"regime={selected[1].gen_trend} ADX={selected[1].adx:.1f}"
+        )
+        return selected[0]
+
+    print("[SCAN] No favourite tokens configured; scanning market for candidates")
     tickers = exchange.fetch_tickers()
     candidates = []
     for pair, ticker in tickers.items():
@@ -43,12 +81,7 @@ def select_candidate(exchange):
     ranked = []
     for pair, change, volume in candidates[:TOP_CANDIDATE_COUNT]:
         try:
-            symbol = pair.replace("/", "")
-            ohlcv = exchange.fetch_ohlcv(pair, timeframe=EXECUTION_TIMEFRAME, limit=WINDOW_SIZE + 1)
-            engine = SignalEngine(WINDOW_SIZE)
-            for row in ohlcv[:-1]:
-                engine.update(symbol, {"timestamp": row[0], "open": row[1], "high": row[2], "low": row[3], "close": row[4], "volume": row[5]})
-            analysis = engine.get_market_analysis(symbol)
+            analysis = _analyse_candidate(exchange, pair)
             if analysis and analysis.should_trade:
                 ranked.append((pair, change, volume, analysis))
         except Exception as exc:
