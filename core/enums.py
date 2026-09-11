@@ -12,3 +12,4 @@ class MarketRegime(Enum):
     TREND_DOWN = "trend_down"
     RANGE = "range"
     VOLATILE = "volatile"
+    EXTREME = "extreme"
