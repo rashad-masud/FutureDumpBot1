@@ -1,141 +1,124 @@
-import ccxt
+import os
 import time
-import sys
+import ccxt
+
 from config.settings import *
 from signals.signal_engine import SignalEngine
 from strategy.strategy_manager import StrategyManager
-from strategy.dump_shorting_strategy import DumpShortingStrategy
+from strategy.futures_trend_strategy import FuturesTrendStrategy
 from trading.ccxtpapertradeexecutor import CCXTPaperTradeExecutor
 from data_provider.ccxtdatafeed import CCXTDataFeed
 from trading.tradingbot import TradingBot
 from data.warmup import warmup_engine
-from utils.emailnotifier import send_email
 
-def main():
-    print("[MAIN] Starting Dump Trading Bot (Small Volatile Coins Only)")
-    exchange = ccxt.binance({"enableRateLimit": True, "timeout": 20000})
 
-    global stop_feed
-    stop_feed = False
+def build_exchange():
+    if EXCHANGE_ID != "binance":
+        raise ValueError(f"Unsupported exchange: {EXCHANGE_ID}")
+    params = {"enableRateLimit": True, "timeout": FETCH_TIMEOUT_MS}
+    if not PAPER_TRADE:
+        params["apiKey"] = os.getenv("BINANCE_API_KEY", "")
+        params["secret"] = os.getenv("BINANCE_API_SECRET", "")
+        if not params["apiKey"] or not params["secret"]:
+            raise RuntimeError("BINANCE_API_KEY and BINANCE_API_SECRET are required for live mode")
+    return ccxt.binanceusdm(params)
 
-    def feed_stop_flag():
-        return stop_feed
 
-    def select_symbol():
-        print("[SCAN] Fetching top gainers...")
-        tickers = exchange.fetch_tickers()
-        usdt_pairs = [s for s in tickers if s.endswith('/USDT')]
+def symbol_with_quote(symbol):
+    return symbol if "/" in symbol else f"{symbol}/{QUOTE_CURRENCY}"
 
-        candidates = []
-        for pair in usdt_pairs:
-            # Extract base currency (e.g., "BTC" from "BTC/USDT")
-            base = pair.split('/')[0]
-            # Skip blacklisted large caps
-            if base in LARGE_CAP_BLACKLIST:
-                continue
 
-            t = tickers[pair]
-            change = t.get('percentage')
-            volume = t.get('quoteVolume', 0)
-            if change is not None and volume >= MIN_VOLUME_USDT:
-                candidates.append({
-                    'symbol': pair.replace('/', ''),
-                    'original_pair': pair,
-                    'base': base,
-                    'change_24h': change,
-                    'volume': volume
-                })
+def select_candidate(exchange):
+    tickers = exchange.fetch_tickers()
+    candidates = []
+    for pair, ticker in tickers.items():
+        if not pair.endswith(f"/{QUOTE_CURRENCY}"):
+            continue
+        base = pair.split("/")[0]
+        if base in LARGE_CAP_BLACKLIST:
+            continue
+        volume = ticker.get("quoteVolume") or 0
+        change = ticker.get("percentage")
+        if change is None or volume < MIN_VOLUME_USDT:
+            continue
+        candidates.append((pair, float(change), float(volume)))
 
-        if not candidates:
-            print("[SCAN] No candidates found after filtering.")
-            return None
-        candidates.sort(key=lambda x: x['change_24h'], reverse=True)
-        top_gainers = candidates[:TOP_GAINER_COUNT]
+    candidates.sort(key=lambda x: abs(x[1]), reverse=True)
+    strategy = FuturesTrendStrategy()
+    ranked = []
+    for pair, change, volume in candidates[:TOP_CANDIDATE_COUNT]:
+        try:
+            symbol = pair.replace("/", "")
+            ohlcv = exchange.fetch_ohlcv(pair, timeframe=EXECUTION_TIMEFRAME, limit=WINDOW_SIZE + 1)
+            engine = SignalEngine(WINDOW_SIZE)
+            for row in ohlcv[:-1]:
+                engine.update(symbol, {"timestamp": row[0], "open": row[1], "high": row[2], "low": row[3], "close": row[4], "volume": row[5]})
+            analysis = engine.get_market_analysis(symbol)
+            if analysis and analysis.should_trade:
+                signal = strategy.evaluate(list(engine.candles[symbol]), analysis)
+                if signal:
+                    ranked.append((pair, change, volume, analysis))
+        except Exception as exc:
+            print(f"[SCAN] {pair}: {exc}")
 
-        dump_candidates = []
-        for cand in top_gainers:
-            sym = cand['symbol']
-            orig_pair = cand['original_pair']
-            try:
-                ohlcv = exchange.fetch_ohlcv(orig_pair, timeframe='1h', limit=DUMP_LOOKBACK_CANDLES+5)
-                if len(ohlcv) < DUMP_LOOKBACK_CANDLES:
-                    continue
-                candles = [{'timestamp': o[0], 'open': o[1], 'high': o[2], 'low': o[3], 'close': o[4], 'volume': o[5]} for o in ohlcv]
-                temp_engine = SignalEngine(window_size=200)
-                for c in candles:
-                    temp_engine.update(sym, c)
-                analysis = temp_engine.get_market_analysis(sym)
-                if analysis and analysis.gen_trend == "dump":
-                    strategy = DumpShortingStrategy()
-                    if strategy.evaluate(candles, analysis):
-                        dump_candidates.append(cand)
-            except Exception as e:
-                print(f"[SCAN] Error {sym}: {e}")
+    if not ranked:
+        return None
+    ranked.sort(key=lambda item: abs(item[1]), reverse=True)
+    selected = ranked[0]
+    print(
+        f"[SCAN] Selected {selected[0]} 24h={selected[1]:.2f}% "
+        f"regime={selected[3].gen_trend} ADX={selected[3].adx:.1f}"
+    )
+    return selected[0]
 
-        if not dump_candidates:
-            return None
 
-        if len(dump_candidates) > 0:
-            subject = "Multiple Dump Candidates"
-            body = "Symbols in dump:\n" + "\n".join(f"- {c['symbol']}" for c in dump_candidates)
-            send_email(subject, body)
-            print("[SCAN] Multiple candidates, email sent.")
+def run_symbol(exchange, pair):
+    stopped = {"value": False}
 
-        best = max(dump_candidates, key=lambda x: x['change_24h'])
-        print(f"[SCAN] Selected {best['symbol']} (base: {best['base']})")
-        return best['symbol']
+    def stop_flag():
+        return stopped["value"]
 
     def on_trade_closed():
-        global stop_feed
-        stop_feed = True
-        print("[BOT] Trade closed, stopping feed.")
+        stopped["value"] = True
 
-    def run_for_symbol(symbol):
-        global stop_feed
-        stop_feed = False
+    symbol = pair.replace("/", "")
+    engine = SignalEngine(WINDOW_SIZE)
+    manager = StrategyManager([FuturesTrendStrategy()])
+    executor = CCXTPaperTradeExecutor()
+    bot = TradingBot(engine, manager, executor, on_trade_closed=on_trade_closed)
 
-        if symbol.endswith('USDT'):
-            symbol_with_slash = symbol[:-4] + '/' + symbol[-4:]
-        else:
-            symbol_with_slash = symbol
+    warmup_engine(exchange, bot, symbol, pair)
+    feed = CCXTDataFeed(
+        exchange,
+        pair,
+        EXECUTION_TIMEFRAME,
+        bot.on_candle,
+        bot.on_price_tick,
+        stop_flag=stop_flag,
+    )
+    print(f"[BOT] Futures paper trading {pair} on {EXECUTION_TIMEFRAME}")
+    feed.start()
 
-        engine = SignalEngine(window_size=200)
-        manager = StrategyManager([DumpShortingStrategy()])
-        executor = CCXTPaperTradeExecutor() if PAPER_TRADE else None  # Replace with live if needed
-        bot = TradingBot(engine, manager, executor, on_trade_closed=on_trade_closed)
 
-        warmup_engine(exchange, bot, symbol, symbol_with_slash)
-
-        feed = CCXTDataFeed(
-            exchange,
-            symbol_with_slash,
-            TIMEFRAME,
-            bot.on_candle,
-            bot.on_price_tick,
-            stop_flag=feed_stop_flag
-        )
-        print(f"[LIVE] Trading {symbol}")
-        feed.start()
-        print(f"[LIVE] Stopped {symbol}")
-
+def main():
+    print("[MAIN] Starting configurable futures trend-following bot (paper mode)")
+    exchange = build_exchange()
     while True:
         try:
-            sym = select_symbol()
-            if not sym:
-                print("[MAIN] No dump candidate. Wait 1 min.")
-                time.sleep(60)
+            pair = select_candidate(exchange)
+            if not pair:
+                print("[MAIN] No healthy breakout candidate; rescanning")
+                time.sleep(SYMBOL_SCAN_INTERVAL_SECONDS)
                 continue
-            run_for_symbol(sym)
-            print("[MAIN] Trade finished. Rescanning...")
-            time.sleep(5)
+            run_symbol(exchange, pair)
+            time.sleep(2)
         except KeyboardInterrupt:
-            print("[MAIN] Stopped by user.")
-            break
-        except Exception as e:
-            print(f"[MAIN] Unhandled error: {e}")
-            import traceback
-            traceback.print_exc()
-            time.sleep(60)
+            print("[MAIN] Stopped by user")
+            return
+        except Exception as exc:
+            print(f"[MAIN] {exc}")
+            time.sleep(SYMBOL_SCAN_INTERVAL_SECONDS)
+
 
 if __name__ == "__main__":
     main()
