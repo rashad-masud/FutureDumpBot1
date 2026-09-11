@@ -1,13 +1,14 @@
 from enum import Enum
 
+
 class SignalType(Enum):
+    LONG = "long"
     SHORT = "short"
-    # LONG removed – we only short
+    FLAT = "flat"
+
 
 class MarketRegime(Enum):
-    DUMP = "dump"
+    TREND_UP = "trend_up"
     TREND_DOWN = "trend_down"
     RANGE = "range"
     VOLATILE = "volatile"
-    BREAKOUT = "breakout"
-    # TREND_UP removed
