@@ -13,24 +13,26 @@ from config.settings import (
 
 
 class FuturesTrendStrategy:
-    """Mechanical Donchian/Turtle-style trend-following entry model."""
+    """Mechanical futures entry model; analysis owns the stricter regime gate."""
 
     def evaluate(self, candles, analysis):
         if not analysis or not analysis.should_trade:
             return None
         if analysis.trend_age < MIN_TREND_AGE:
             return None
+        if not analysis.entry_breakout:
+            return None
         if REQUIRE_ADX_CONFIRMATION and analysis.adx < MIN_ADX:
             return None
         if REQUIRE_VOLUME_CONFIRMATION and analysis.volume_ratio < MIN_VOLUME_RATIO:
             return None
 
-        if analysis.gen_trend == "trend_up" and analysis.entry_breakout and ALLOW_LONG:
+        if analysis.gen_trend == "trend_up" and ALLOW_LONG:
             if REQUIRE_EMA_ALIGNMENT and analysis.ema_fast <= analysis.ema_slow:
                 return None
             return Signal(SignalType.LONG)
 
-        if analysis.gen_trend == "trend_down" and analysis.entry_breakout and ALLOW_SHORT:
+        if analysis.gen_trend == "trend_down" and ALLOW_SHORT:
             if REQUIRE_EMA_ALIGNMENT and analysis.ema_fast >= analysis.ema_slow:
                 return None
             return Signal(SignalType.SHORT)
