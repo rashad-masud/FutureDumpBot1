@@ -19,6 +19,7 @@ class Position:
     open_candle_id: int | None = None
     open_tick_id: int | None = None
     trail_active: bool = False
+    entry_fee: float = 0.0
 
     def __post_init__(self):
         if self.best_price is None:
