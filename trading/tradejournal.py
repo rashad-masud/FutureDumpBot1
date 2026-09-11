@@ -16,6 +16,8 @@ class TradeJournal:
         self.log_dir = LOG_DIRECTORY
         self.file_path = os.path.join(self.log_dir, TRADE_LOG_FILENAME)
         self._last_open = None
+        self._closed_trade_ids = set()
+        self._load_closed_trade_ids()
         self._ensure_file()
 
     def _ensure_file(self):
@@ -23,6 +25,19 @@ class TradeJournal:
         if not os.path.exists(self.file_path):
             with open(self.file_path, "w", newline="") as f:
                 csv.DictWriter(f, fieldnames=self.FIELDS).writeheader()
+
+    def _load_closed_trade_ids(self):
+        if not os.path.exists(self.file_path):
+            return
+        try:
+            with open(self.file_path, "r", newline="") as f:
+                for row in csv.DictReader(f):
+                    trade_id = row.get("trade_id")
+                    if trade_id:
+                        self._closed_trade_ids.add(str(trade_id))
+        except (OSError, csv.Error):
+            # Do not prevent the bot starting because a log file is unreadable.
+            self._closed_trade_ids = set()
 
     def record_open(self, symbol, side, regime, entry_price, size, leverage, stop_pct, *, trade_id=None, open_candle_id=None, open_tick_id=None):
         self._last_open = {
@@ -39,6 +54,10 @@ class TradeJournal:
         }
 
     def record_close(self, *, trade_id=None, side=None, entry_price=None, exit_price=None, pnl=None, balance_after=None, reason=None, open_candle_id=None, close_candle_id=None, open_tick_id=None, close_tick_id=None):
+        key = str(trade_id) if trade_id is not None else ""
+        if key and key in self._closed_trade_ids:
+            return False
+
         open_data = self._last_open or {}
         row = {
             "timestamp": int(time.time()),
@@ -61,4 +80,7 @@ class TradeJournal:
         }
         with open(self.file_path, "a", newline="") as f:
             csv.DictWriter(f, fieldnames=self.FIELDS).writerow(row)
+        if key:
+            self._closed_trade_ids.add(key)
         self._last_open = None
+        return True
