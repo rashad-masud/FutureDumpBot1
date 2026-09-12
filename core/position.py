@@ -15,14 +15,18 @@ class Position:
     atr: float
     trail_stop: float | None = None
     best_price: float | None = None
+    worst_price: float | None = None
     opened_at: float = field(default_factory=lambda: datetime.utcnow().timestamp())
     open_candle_id: int | None = None
     open_tick_id: int | None = None
     trail_active: bool = False
+    entry_fee: float = 0.0
 
     def __post_init__(self):
         if self.best_price is None:
             self.best_price = self.entry_price
+        if self.worst_price is None:
+            self.worst_price = self.entry_price
 
     def pnl(self, current_price: float) -> float:
         if self.side == "long":
