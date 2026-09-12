@@ -24,6 +24,14 @@ class MarketAnalysis:
     entry_breakout: bool = False
     exit_level_long: float = 0.0
     exit_level_short: float = 0.0
+    trend_15m: str = "unknown"
+    trend_30m: str = "unknown"
+    trend_60m: str = "unknown"
+    adx_15m: float = 0.0
+    adx_30m: float = 0.0
+    adx_60m: float = 0.0
+    mtf_aligned: bool = False
+    higher_tf_not_bearish: bool = True
     timestamp: float = 0.0
 
     def __post_init__(self):
