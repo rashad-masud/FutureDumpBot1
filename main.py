@@ -24,6 +24,34 @@ def build_exchange():
     return ccxt.binanceusdm(params)
 
 
+def _to_candle(row):
+    return {"timestamp": row[0], "open": row[1], "high": row[2], "low": row[3], "close": row[4], "volume": row[5]}
+
+
+def _load_context(exchange, pair, timeframe, limit):
+    rows = exchange.fetch_ohlcv(pair, timeframe=timeframe, limit=limit + 1)
+    # Never use the currently forming higher-timeframe candle for a regime decision.
+    return [_to_candle(row) for row in rows[:-1]]
+
+
+def _apply_mtf(exchange, engine, symbol, pair):
+    if not MTF_ENABLED:
+        return
+    candles_15m = _load_context(exchange, pair, MTF_TIMEFRAME_15M, MTF_WINDOW_SIZE)
+    candles_30m = _load_context(exchange, pair, MTF_TIMEFRAME_30M, MTF_WINDOW_SIZE)
+    engine.update_mtf(symbol, candles_15m, candles_30m)
+
+
+def _analyse_candidate(exchange, pair):
+    symbol = pair.replace("/", "")
+    rows = exchange.fetch_ohlcv(pair, timeframe=EXECUTION_TIMEFRAME, limit=WINDOW_SIZE + 1)
+    engine = SignalEngine(WINDOW_SIZE)
+    for row in rows[:-1]:
+        engine.update(symbol, _to_candle(row))
+    _apply_mtf(exchange, engine, symbol, pair)
+    return engine.get_market_analysis(symbol)
+
+
 def select_candidate(exchange):
     tickers = exchange.fetch_tickers()
     candidates = []
@@ -43,12 +71,7 @@ def select_candidate(exchange):
     ranked = []
     for pair, change, volume in candidates[:TOP_CANDIDATE_COUNT]:
         try:
-            symbol = pair.replace("/", "")
-            ohlcv = exchange.fetch_ohlcv(pair, timeframe=EXECUTION_TIMEFRAME, limit=WINDOW_SIZE + 1)
-            engine = SignalEngine(WINDOW_SIZE)
-            for row in ohlcv[:-1]:
-                engine.update(symbol, {"timestamp": row[0], "open": row[1], "high": row[2], "low": row[3], "close": row[4], "volume": row[5]})
-            analysis = engine.get_market_analysis(symbol)
+            analysis = _analyse_candidate(exchange, pair)
             if analysis and analysis.should_trade:
                 ranked.append((pair, change, volume, analysis))
         except Exception as exc:
@@ -58,10 +81,8 @@ def select_candidate(exchange):
         return None
     ranked.sort(key=lambda item: (item[3].adx, abs(item[1])), reverse=True)
     selected = ranked[0]
-    print(
-        f"[SCAN] Selected {selected[0]} 24h={selected[1]:.2f}% "
-        f"regime={selected[3].gen_trend} ADX={selected[3].adx:.1f}"
-    )
+    print(f"[SCAN] Selected {selected[0]} 24h={selected[1]:.2f}% regime={selected[3].gen_trend} "
+          f"ADX={selected[3].adx:.1f} MTF15={selected[3].trend_15m} MTF30={selected[3].trend_30m}")
     return selected[0]
 
 
@@ -80,16 +101,30 @@ def run_symbol(exchange, pair):
     executor = CCXTPaperTradeExecutor()
     bot = TradingBot(engine, manager, executor, on_trade_closed=on_trade_closed)
 
+    # Warm up 1m execution history and closed higher-timeframe context before allowing entries.
+    _apply_mtf(exchange, engine, symbol, pair)
     warmup_engine(exchange, bot, symbol, pair)
+    bot.set_ready()
+
+    def on_candle(candle_symbol, candle):
+        # Refresh context exactly when a new 15m block starts; the just-completed
+        # 15m and 30m candles are then available while the new 1m candle is processed.
+        if MTF_ENABLED and candle["timestamp"] % (15 * 60 * 1000) == 0:
+            try:
+                _apply_mtf(exchange, engine, symbol, pair)
+            except Exception as exc:
+                print(f"[MTF] {pair}: {exc}")
+        bot.on_candle(candle_symbol, candle)
+
     feed = CCXTDataFeed(
         exchange,
         pair,
         EXECUTION_TIMEFRAME,
-        bot.on_candle,
+        on_candle,
         bot.on_price_tick,
         stop_flag=stop_flag,
     )
-    print(f"[BOT] Binance USDT-M futures paper trading {pair} on {EXECUTION_TIMEFRAME}")
+    print(f"[BOT] Binance USDT-M futures paper trading {pair} on {EXECUTION_TIMEFRAME}; MTF=15m+30m")
     feed.start()
 
 
@@ -100,7 +135,7 @@ def main():
         try:
             pair = select_candidate(exchange)
             if not pair:
-                print("[MAIN] No healthy trend candidate; rescanning")
+                print("[MAIN] No healthy MTF-aligned trend candidate; rescanning")
                 time.sleep(SYMBOL_SCAN_INTERVAL_SECONDS)
                 continue
             run_symbol(exchange, pair)
