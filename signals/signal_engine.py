@@ -9,13 +9,14 @@ from config.settings import (
     MIN_ENTRY_CONFIDENCE, SHORT_EXTRA_VOLUME_RATIO, SHORT_EXTRA_ADX,
     MIN_PRICE_TREND_PCT_FOR_ENTRY, MTF_ENABLED, MTF_MIN_ADX,
     MTF_MIN_TREND_PCT, REQUIRE_MTF_ALIGNMENT,
+    REQUIRE_60M_DIRECTIONAL_CONFIRMATION, VETO_60M_OPPOSITE_TREND,
 )
 from core.enums import MarketRegime
 from core.model import MarketAnalysis
 
 
 class SignalEngine:
-    """Closed-bar regime engine with strict 1m entry + 15m/30m confirmation."""
+    """Closed-bar regime engine with 1m execution + 15m/30m structure + 60m safety context."""
 
     def __init__(self, window_size: int = WINDOW_SIZE):
         self.window_size = window_size
@@ -31,11 +32,12 @@ class SignalEngine:
         self.candles[symbol].append(candle)
         self._analyze(symbol)
 
-    def update_mtf(self, symbol: str, candles_15m: List[dict], candles_30m: List[dict]) -> None:
+    def update_mtf(self, symbol: str, candles_15m: List[dict], candles_30m: List[dict], candles_60m: List[dict]) -> None:
         """Store only closed higher-timeframe context and re-evaluate the symbol."""
         self._mtf[symbol] = {
             "15m": self._timeframe_context(candles_15m),
             "30m": self._timeframe_context(candles_30m),
+            "60m": self._timeframe_context(candles_60m),
         }
         if symbol in self.candles:
             self._analyze(symbol)
@@ -158,8 +160,14 @@ class SignalEngine:
         confidence = min(1.0, adx / 100.0)
 
         mtf = self._mtf.get(symbol, {})
-        ctx15, ctx30 = mtf.get("15m", {}), mtf.get("30m", {})
-        trend15, trend30 = ctx15.get("trend", "unknown"), ctx30.get("trend", "unknown")
+        ctx15 = mtf.get("15m", {})
+        ctx30 = mtf.get("30m", {})
+        ctx60 = mtf.get("60m", {})
+        trend15, trend30, trend60 = (
+            ctx15.get("trend", "unknown"),
+            ctx30.get("trend", "unknown"),
+            ctx60.get("trend", "unknown"),
+        )
         if regime == MarketRegime.TREND_UP:
             mtf_aligned = trend15 == "trend_up" and trend30 == "trend_up"
         elif regime == MarketRegime.TREND_DOWN:
@@ -167,15 +175,42 @@ class SignalEngine:
         else:
             mtf_aligned = False
 
+        # 60m is a directional safety layer, not a fourth alignment requirement.
+        # This preserves early opportunities when 60m is still neutral/ranging,
+        # while blocking a long against a clear hourly downtrend and vice versa.
+        higher_tf_not_bearish = trend60 != "trend_down"
+        higher_tf_not_bullish = trend60 != "trend_up"
+        if REQUIRE_60M_DIRECTIONAL_CONFIRMATION:
+            if regime == MarketRegime.TREND_UP:
+                higher_tf_ok = trend60 == "trend_up"
+            elif regime == MarketRegime.TREND_DOWN:
+                higher_tf_ok = trend60 == "trend_down"
+            else:
+                higher_tf_ok = False
+        elif VETO_60M_OPPOSITE_TREND:
+            higher_tf_ok = higher_tf_not_bearish if regime == MarketRegime.TREND_UP else higher_tf_not_bullish if regime == MarketRegime.TREND_DOWN else True
+        else:
+            higher_tf_ok = True
+
         short_quality = regime == MarketRegime.TREND_DOWN and adx >= SHORT_EXTRA_ADX and volume_ratio >= SHORT_EXTRA_VOLUME_RATIO and price_change_pct <= -MIN_PRICE_TREND_PCT_FOR_ENTRY
         long_quality = regime == MarketRegime.TREND_UP and price_change_pct >= MIN_PRICE_TREND_PCT_FOR_ENTRY
         quality_ok = confidence >= MIN_ENTRY_CONFIDENCE and directional_candle and (short_quality or long_quality)
         mtf_ok = (not MTF_ENABLED or not REQUIRE_MTF_ALIGNMENT or mtf_aligned)
-        should_trade = regime in (MarketRegime.TREND_UP, MarketRegime.TREND_DOWN) and age >= MIN_TREND_AGE and volume_ok and entry_breakout and quality_ok and mtf_ok
+        should_trade = (
+            regime in (MarketRegime.TREND_UP, MarketRegime.TREND_DOWN)
+            and age >= MIN_TREND_AGE
+            and volume_ok
+            and entry_breakout
+            and quality_ok
+            and mtf_ok
+            and higher_tf_ok
+        )
 
         reason = "healthy_mtf_trend_breakout" if should_trade else regime_value
         if MTF_ENABLED and not mtf_ok:
             reason = "mtf_alignment_failed"
+        elif not higher_tf_ok:
+            reason = "60m_opposite_trend"
         elif regime == MarketRegime.TREND_DOWN and entry_breakout and not short_quality:
             reason = "short_quality_gate_failed"
         elif not quality_ok and regime in (MarketRegime.TREND_UP, MarketRegime.TREND_DOWN):
@@ -191,11 +226,12 @@ class SignalEngine:
             ema_fast=ema_fast, ema_slow=ema_slow, atr=atr, atr_pct=atr_pct,
             adx=adx, volume_ratio=volume_ratio, entry_breakout=entry_breakout,
             exit_level_long=lowest_exit, exit_level_short=highest_exit,
-            trend_15m=trend15, trend_30m=trend30,
-            adx_15m=ctx15.get("adx", 0.0), adx_30m=ctx30.get("adx", 0.0),
-            mtf_aligned=mtf_aligned,
+            trend_15m=trend15, trend_30m=trend30, trend_60m=trend60,
+            adx_15m=ctx15.get("adx", 0.0), adx_30m=ctx30.get("adx", 0.0), adx_60m=ctx60.get("adx", 0.0),
+            mtf_aligned=mtf_aligned, higher_tf_not_bearish=higher_tf_not_bearish,
         )
 
         print(f"[REGIME] {symbol} | {regime_value} | ADX={adx:.1f} | ATR%={atr_pct:.3%} | "
               f"EMA={ema_fast:.4f}/{ema_slow:.4f} | volx={volume_ratio:.2f} | "
-              f"breakout={entry_breakout} | MTF15={trend15} MTF30={trend30} aligned={mtf_aligned} | quality={quality_ok}")
+              f"breakout={entry_breakout} | MTF15={trend15} MTF30={trend30} MTF60={trend60} "
+              f"aligned={mtf_aligned} higher_ok={higher_tf_ok} | quality={quality_ok}")
