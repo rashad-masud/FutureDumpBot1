@@ -35,14 +35,20 @@ MIN_VOLUME_RATIO = 1.0
 BREAKOUT_BUFFER_ATR = 0.10
 MIN_TREND_AGE = 2
 
-# Multi-timeframe regime confirmation: execution on 1m, context from closed 15m + 30m bars.
+# Multi-timeframe regime confirmation: execution on 1m, context from closed 15m + 30m bars,
+# with 60m used as the higher-timeframe directional safety layer.
 MTF_ENABLED = True
 MTF_TIMEFRAME_15M = "15m"
 MTF_TIMEFRAME_30M = "30m"
+MTF_TIMEFRAME_60M = "1h"
 MTF_WINDOW_SIZE = 100
 MTF_MIN_ADX = 20.0
 MTF_MIN_TREND_PCT = 0.003
 REQUIRE_MTF_ALIGNMENT = True
+# 60m is deliberately a veto, not a fourth hard alignment requirement. A range/neutral
+# hourly market must not suppress an otherwise valid 1m/15m/30m setup.
+REQUIRE_60M_DIRECTIONAL_CONFIRMATION = False
+VETO_60M_OPPOSITE_TREND = True
 
 # Entry quality
 REQUIRE_VOLUME_CONFIRMATION = True
