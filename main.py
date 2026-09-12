@@ -39,7 +39,8 @@ def _apply_mtf(exchange, engine, symbol, pair):
         return
     candles_15m = _load_context(exchange, pair, MTF_TIMEFRAME_15M, MTF_WINDOW_SIZE)
     candles_30m = _load_context(exchange, pair, MTF_TIMEFRAME_30M, MTF_WINDOW_SIZE)
-    engine.update_mtf(symbol, candles_15m, candles_30m)
+    candles_60m = _load_context(exchange, pair, MTF_TIMEFRAME_60M, MTF_WINDOW_SIZE)
+    engine.update_mtf(symbol, candles_15m, candles_30m, candles_60m)
 
 
 def _analyse_candidate(exchange, pair):
@@ -82,7 +83,8 @@ def select_candidate(exchange):
     ranked.sort(key=lambda item: (item[3].adx, abs(item[1])), reverse=True)
     selected = ranked[0]
     print(f"[SCAN] Selected {selected[0]} 24h={selected[1]:.2f}% regime={selected[3].gen_trend} "
-          f"ADX={selected[3].adx:.1f} MTF15={selected[3].trend_15m} MTF30={selected[3].trend_30m}")
+          f"ADX={selected[3].adx:.1f} MTF15={selected[3].trend_15m} "
+          f"MTF30={selected[3].trend_30m} MTF60={selected[3].trend_60m}")
     return selected[0]
 
 
@@ -101,14 +103,14 @@ def run_symbol(exchange, pair):
     executor = CCXTPaperTradeExecutor()
     bot = TradingBot(engine, manager, executor, on_trade_closed=on_trade_closed)
 
-    # Warm up 1m execution history and closed higher-timeframe context before allowing entries.
+    # Warm up 1m execution history and closed 15m/30m/60m context before allowing entries.
     _apply_mtf(exchange, engine, symbol, pair)
     warmup_engine(exchange, bot, symbol, pair)
     bot.set_ready()
 
     def on_candle(candle_symbol, candle):
-        # Refresh context exactly when a new 15m block starts; the just-completed
-        # 15m and 30m candles are then available while the new 1m candle is processed.
+        # Refresh all higher-timeframe context when a new 15m block starts. The
+        # just-completed 15m, 30m and 60m candles are then available to the new 1m candle.
         if MTF_ENABLED and candle["timestamp"] % (15 * 60 * 1000) == 0:
             try:
                 _apply_mtf(exchange, engine, symbol, pair)
@@ -124,7 +126,7 @@ def run_symbol(exchange, pair):
         bot.on_price_tick,
         stop_flag=stop_flag,
     )
-    print(f"[BOT] Binance USDT-M futures paper trading {pair} on {EXECUTION_TIMEFRAME}; MTF=15m+30m")
+    print(f"[BOT] Binance USDT-M futures paper trading {pair} on {EXECUTION_TIMEFRAME}; MTF=15m+30m+60m")
     feed.start()
 
 
